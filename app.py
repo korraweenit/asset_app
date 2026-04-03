@@ -7,31 +7,17 @@ import datetime
 from backend.data import fetch_data
 from backend.calc import calculate_metrics, calculate_portfolio_dca
 
+# Import frontend components
+from frontend.components import render_strategy_input, display_strategy_metrics
+
 # ==========================================
 # ⚙️ CONFIG & STYLE
 # ==========================================
 st.set_page_config(page_title="Portfolio Backtest Comparison", layout="wide")
 
-# Custom CSS for better looking metrics
-st.markdown("""
-    <style>
-    [data-testid="stMetricValue"] {
-        font-size: 28px;
-        color: #1E88E5;
-    }
-    [data-testid="stMetricLabel"] {
-        font-weight: bold;
-        text-transform: uppercase;
-        font-size: 14px;
-    }
-    .stMetric {
-        background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# Load Custom CSS
+with open("frontend/style.css") as f:
+    st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 # ==========================================
 # 🔄 SESSION STATE MANAGEMENT
@@ -40,13 +26,6 @@ if 'strategy_a' not in st.session_state:
     st.session_state.strategy_a = [{'ticker': 'VOO', 'weight': 80}, {'ticker': 'GLD', 'weight': 20}]
 if 'strategy_b' not in st.session_state:
     st.session_state.strategy_b = [{'ticker': 'VOO', 'weight': 100}]
-
-def add_asset(strategy_key):
-    st.session_state[strategy_key].append({'ticker': '', 'weight': 0})
-
-def remove_asset(strategy_key, index):
-    if len(st.session_state[strategy_key]) > 1:
-        st.session_state[strategy_key].pop(index)
 
 # ==========================================
 # 🎨 FRONTEND UI (Sidebar)
@@ -73,39 +52,6 @@ with st.sidebar:
         start_date = today - datetime.timedelta(days=20*365)
     else: # YTD
         start_date = datetime.date(today.year, 1, 1)
-
-    def render_strategy_input(label, strategy_key):
-        st.divider()
-        st.header(label)
-        
-        current_weights = 0
-        for i, asset in enumerate(st.session_state[strategy_key]):
-            col1, col2, col3 = st.columns([3, 4, 1])
-            with col1:
-                asset['ticker'] = st.text_input(f"Ticker", asset['ticker'], key=f"{strategy_key}_t_{i}").upper()
-            with col2:
-                asset['weight'] = st.slider(f"Weight (%)", 0, 100, asset['weight'], key=f"{strategy_key}_w_{i}")
-                current_weights += asset['weight']
-            with col3:
-                st.write("") # Spacer
-                st.write("") # Spacer
-                if st.button("🗑️", key=f"{strategy_key}_rm_{i}"):
-                    remove_asset(strategy_key, i)
-                    st.rerun()
-        
-        col_btn, col_info = st.columns([1, 1])
-        with col_btn:
-            if st.button(f"➕ Add Asset", key=f"{strategy_key}_add"):
-                add_asset(strategy_key)
-                st.rerun()
-        
-        with col_info:
-            if current_weights == 100:
-                st.success(f"Total: {current_weights}%")
-            else:
-                st.error(f"Total: {current_weights}%")
-        
-        return current_weights
 
     total_w_a = render_strategy_input("🛡️ Strategy A", "strategy_a")
     total_w_b = render_strategy_input("🎯 Strategy B", "strategy_b")
@@ -147,24 +93,6 @@ if run_btn:
                 
                 col_a, col_b = st.columns(2)
                 
-                def display_strategy_metrics(label, met, assets):
-                    with st.container(border=True):
-                        asset_desc = " + ".join([f"{a['ticker']}({a['weight']}%)" for a in assets if a['ticker']])
-                        st.markdown(f"#### {label}")
-                        st.caption(asset_desc)
-                        
-                        m1, m2 = st.columns(2)
-                        m1.metric("Final Value", f"{met['final_value']:,.0f}")
-                        m2.metric("Total Invested", f"{met['total_invested']:,.0f}")
-                        
-                        m3, m4 = st.columns(2)
-                        m3.metric("Total Return", f"{met['total_return']*100:.2f}%")
-                        m4.metric("CAGR (%)", f"{met['cagr']*100:.2f}%")
-                        
-                        m5, m6 = st.columns(2)
-                        m5.metric("Volatility", f"{met['volatility']*100:.2f}%")
-                        m6.metric("Max Drawdown", f"{met['max_drawdown']*100:.2f}%")
-
                 if met_a:
                     with col_a:
                         display_strategy_metrics("🛡️ Strategy A", met_a, st.session_state.strategy_a)

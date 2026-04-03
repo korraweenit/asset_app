@@ -1,0 +1,15 @@
+[data-testid="stMetricValue"] {
+    font-size: 28px;
+    color: #1E88E5;
+}
+[data-testid="stMetricLabel"] {
+    font-weight: bold;
+    text-transform: uppercase;
+    font-size: 14px;
+}
+.stMetric {
+    background-color: #f8f9fa;
+    padding: 15px;
+    border-radius: 10px;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
+}
