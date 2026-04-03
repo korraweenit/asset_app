@@ -5,6 +5,7 @@ import plotly.express as px
 import datetime
 import numpy as np
 
+
 # ==========================================
 # ⚙️ CONFIG & STYLE
 # ==========================================
@@ -72,24 +73,34 @@ def fetch_data(tickers, start_date):
         st.error(f"⚠️ ดึงข้อมูลล้มเหลว: {e}")
         return pd.DataFrame()
 
-def calculate_metrics(cum_return, daily_returns):
-    """คำนวณสถิติสำคัญ: Total Return, CAGR, Volatility, Max Drawdown"""
-    if cum_return.empty: return None
-    days = (cum_return.index[-1] - cum_return.index[0]).days
+def calculate_metrics(portfolio_series, total_invested, periodic_returns):
+    """คำนวณสถิติสำคัญสำหรับพอร์ต DCA"""
+    if portfolio_series.empty: return None
+    
+    final_value = portfolio_series.iloc[-1]
+    total_return = (final_value - total_invested) / total_invested if total_invested > 0 else 0
+    
+    days = (portfolio_series.index[-1] - portfolio_series.index[0]).days
     actual_years = days / 365.25 if days > 0 else 1.0
     
-    total_return = (cum_return.iloc[-1] - 1)
-    cagr = (cum_return.iloc[-1] ** (1/actual_years)) - 1 if actual_years > 0 else total_return
+    # CAGR safety check
+    if actual_years > 0 and total_invested > 0 and final_value > 0:
+        cagr = ((final_value / total_invested) ** (1/actual_years)) - 1
+    else:
+        cagr = 0
     
-    # Volatility (Annualized Standard Deviation)
-    volatility = daily_returns.std() * np.sqrt(252)
+    # Volatility on organic returns (excluding DCA impact)
+    # Use np.sqrt(12) for monthly data
+    volatility = periodic_returns.fillna(0).std() * np.sqrt(12)
     
     # Max Drawdown
-    rolling_max = cum_return.cummax()
-    drawdown = (cum_return / rolling_max) - 1
+    rolling_max = portfolio_series.cummax()
+    drawdown = (portfolio_series / rolling_max) - 1
     max_drawdown = drawdown.min()
     
     return {
+        "final_value": final_value,
+        "total_invested": total_invested,
         "total_return": total_return,
         "cagr": cagr,
         "volatility": volatility,
@@ -97,26 +108,77 @@ def calculate_metrics(cum_return, daily_returns):
         "years": actual_years
     }
 
-def calculate_portfolio_return(data, assets):
-    """คำนวณผลตอบแทนพอร์ตโฟลิโอแบบ Dynamic"""
-    returns = data.pct_change().dropna()
-    port_ret = pd.Series(0, index=returns.index)
+def calculate_portfolio_dca(data, assets, initial_capital, monthly_dca):
+    """คำนวณมูลค่าพอร์ตแบบ DCA + Semi-Annual Rebalance (ME resampled)"""
+    # Resample to Month End
+    monthly_prices = data.resample('ME').last()
+    tickers = [a['ticker'].upper() for a in assets if a['ticker']]
+    weights = np.array([a['weight'] / 100 for a in assets if a['ticker']])
     
-    for asset in assets:
-        ticker = asset['ticker'].upper()
-        weight = asset['weight'] / 100
-        if ticker in returns.columns:
-            port_ret += returns[ticker] * weight
+    if not tickers or monthly_prices.empty:
+        return pd.Series(), 0, pd.Series()
+
+    prices = monthly_prices[tickers]
+    dates = prices.index
+    
+    # Initial Setup
+    units = np.zeros(len(tickers))
+    portfolio_values = []
+    periodic_returns = []
+    total_invested = 0
+    
+    # Month 0 (Initial Investment)
+    if initial_capital > 0:
+        first_prices = prices.iloc[0].values
+        units = (initial_capital * weights) / first_prices
+        total_invested += initial_capital
+    
+    portfolio_values.append(np.sum(units * prices.iloc[0].values))
+    periodic_returns.append(0)
+    
+    # Subsequent Months
+    for i in range(1, len(dates)):
+        prev_value = portfolio_values[-1]
+        current_prices = prices.iloc[i].values
+        
+        # 1. Organic Growth (Update value with current prices)
+        value_before_dca = np.sum(units * current_prices)
+        
+        # Calculate organic return: (ValueBeforeDCA - PrevValue) / PrevValue
+        if prev_value > 0:
+            ret = (value_before_dca - prev_value) / prev_value
+        else:
+            ret = 0
+        periodic_returns.append(ret)
+        
+        # 2. Add Monthly DCA
+        current_portfolio_value = value_before_dca + monthly_dca
+        total_invested += monthly_dca
+        
+        # 3. Handle Rebalancing (June and December) or just distribute DCA
+        if current_date := dates[i]:
+            if current_date.month in [6, 12]:
+                # Full Rebalance to target weights
+                units = (current_portfolio_value * weights) / current_prices
+            else:
+                # Distribute DCA only (Simplified monthly behavior)
+                units += (monthly_dca * weights) / current_prices
             
-    cum_ret = (1 + port_ret).cumprod()
-    return cum_ret, port_ret
+        portfolio_values.append(np.sum(units * current_prices))
+        
+    return pd.Series(portfolio_values, index=dates), total_invested, pd.Series(periodic_returns, index=dates)
 
 # ==========================================
 # 🎨 FRONTEND UI (Sidebar)
 # ==========================================
-st.title("⚖️ Dynamic Portfolio Backtest")
+st.title("⚖️ Portfolio DCA Backtest")
 
 with st.sidebar:
+    st.header("💰 Investment Settings")
+    initial_cap = st.number_input("เงินลงทุนเริ่มต้น (Initial Capital)", min_value=0, value=0, step=1000)
+    monthly_dca = st.number_input("เงิน DCA ทุกเดือน (Monthly DCA)", min_value=0, value=10000, step=500)
+    
+    st.divider()
     st.header("📅 ช่วงเวลา (Time Period)")
     period_choice = st.selectbox("เลือกช่วงเวลาย้อนหลัง", ["1Y", "5Y", "10Y", "20Y", "YTD"], index=1)
 
@@ -193,57 +255,66 @@ if run_btn:
             
             if not data.empty:
                 # Calculate Portfolio A
-                cum_a, ret_a = calculate_portfolio_return(data, st.session_state.strategy_a)
-                met_a = calculate_metrics(cum_a, ret_a)
+                val_a, invest_a, ret_a = calculate_portfolio_dca(data, st.session_state.strategy_a, initial_cap, monthly_dca)
+                met_a = calculate_metrics(val_a, invest_a, ret_a)
                 
                 # Calculate Portfolio B
-                cum_b, ret_b = calculate_portfolio_return(data, st.session_state.strategy_b)
-                met_b = calculate_metrics(cum_b, ret_b)
+                val_b, invest_b, ret_b = calculate_portfolio_dca(data, st.session_state.strategy_b, initial_cap, monthly_dca)
+                met_b = calculate_metrics(val_b, invest_b, ret_b)
                 
                 # --- 1. Dashboard Metrics ---
-                st.subheader(f"📊 Performance Overview ({met_a['years']:.1f} Years)")
+                st.subheader(f"📊 Performance Overview ({met_a['years']:.1f} Years) (Rebalance every 6m)")
                 
                 col_a, col_b = st.columns(2)
                 
                 def display_strategy_metrics(label, met, assets):
                     with st.container(border=True):
                         asset_desc = " + ".join([f"{a['ticker']}({a['weight']}%)" for a in assets if a['ticker']])
-                        st.markdown(f"#### {label}: {asset_desc}")
+                        st.markdown(f"#### {label}")
+                        st.caption(asset_desc)
+                        
                         m1, m2 = st.columns(2)
-                        m1.metric("Total Return", f"{met['total_return']*100:.2f}%")
-                        m2.metric("CAGR (%)", f"{met['cagr']*100:.2f}%")
+                        m1.metric("Final Value", f"{met['final_value']:,.0f}")
+                        m2.metric("Total Invested", f"{met['total_invested']:,.0f}")
                         
                         m3, m4 = st.columns(2)
-                        m3.metric("Volatility (SD)", f"{met['volatility']*100:.2f}%")
-                        m4.metric("Max Drawdown", f"{met['max_drawdown']*100:.2f}%")
+                        m3.metric("Total Return", f"{met['total_return']*100:.2f}%")
+                        m4.metric("CAGR (%)", f"{met['cagr']*100:.2f}%")
+                        
+                        m5, m6 = st.columns(2)
+                        m5.metric("Volatility", f"{met['volatility']*100:.2f}%")
+                        m6.metric("Max Drawdown", f"{met['max_drawdown']*100:.2f}%")
 
-                with col_a:
-                    display_strategy_metrics("🛡️ Strategy A", met_a, st.session_state.strategy_a)
+                if met_a:
+                    with col_a:
+                        display_strategy_metrics("🛡️ Strategy A", met_a, st.session_state.strategy_a)
 
-                with col_b:
-                    display_strategy_metrics("🎯 Strategy B", met_b, st.session_state.strategy_b)
+                if met_b:
+                    with col_b:
+                        display_strategy_metrics("🎯 Strategy B", met_b, st.session_state.strategy_b)
                 
                 st.markdown("<br>", unsafe_allow_html=True)
 
                 # --- 2. Chart Display ---
                 df_plot = pd.DataFrame({
-                    'Strategy A': cum_a,
-                    'Strategy B': cum_b
+                    'Strategy A': val_a,
+                    'Strategy B': val_b
                 })
-                fig = px.line(df_plot, title=f"Portfolio Growth Comparison ({period_choice})")
+                fig = px.line(df_plot, title=f"Total Wealth Growth Comparison ({period_choice})")
                 fig.update_layout(
                     hovermode="x unified", 
-                    yaxis_title="Portfolio Value ($1 Base)",
+                    yaxis_title="Portfolio Value",
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # --- 3. Expander (Bottom) ---
                 with st.expander("📂 View Raw Data & Details"):
-                    st.dataframe(df_plot.style.format("{:.4f}"), use_container_width=True)
-                    st.info(f"Analysis start from {cum_a.index[0].date()} to {cum_a.index[-1].date()}")
+                    st.dataframe(df_plot.style.format("{:,.2f}"), use_container_width=True)
+                    st.info(f"Analysis start from {val_a.index[0].date()} to {val_a.index[-1].date()}")
             else:
                 st.error("ไม่พบข้อมูลสำหรับ Tickers หรือช่วงเวลาที่ระบุ")
 else:
     if can_run:
         st.info("👈 กด 'Run Comparison' ใน Sidebar เพื่อเริ่มวิเคราะห์")
+
